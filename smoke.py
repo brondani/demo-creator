@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Small end-to-end fixture; planning uses a deterministic Codex stub."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -9,9 +10,6 @@ import sys
 import tempfile
 import wave
 
-DEMO = Path(__file__).resolve().with_name("demo")
-
-
 def cmd(args, **kw):
     result = subprocess.run(args, text=True, capture_output=True, **kw)
     if result.returncode:
@@ -20,6 +18,12 @@ def cmd(args, **kw):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cli", type=Path, default=Path(__file__).resolve().with_name("demo"))
+    parser.add_argument("--plan-only", action="store_true", help="skip container and media checks")
+    args = parser.parse_args()
+    demo = args.cli.resolve()
+    image = runpy.run_path(str(demo))["IMAGE"]
     with tempfile.TemporaryDirectory(prefix="demo-smoke-") as tmp:
         root = Path(tmp)
         repo = root / "fixture"
@@ -54,17 +58,17 @@ open(out,'w').write(json.dumps(data))
         env = os.environ.copy()
         env["PATH"] = f"{stub_dir}:{env['PATH']}"
         draft = root / "draft.json"
-        cmd([str(DEMO), "plan", "--commit", "HEAD", "--out", str(draft)], cwd=repo, env=env)
+        cmd([str(demo), "plan", "--commit", "HEAD", "--out", str(draft)], cwd=repo, env=env)
         data = json.loads(draft.read_text())
         assert data["version"] == 1 and len(data["scenes"]) == 1
         assert not list(root.glob("*.webm")), "planning unexpectedly rendered a video"
         root_draft = root / "root.json"
-        cmd([str(DEMO), "plan", "--commit", "HEAD^", "--out", str(root_draft)], cwd=repo, env=env)
+        cmd([str(demo), "plan", "--commit", "HEAD^", "--out", str(root_draft)], cwd=repo, env=env)
         root_data = json.loads(root_draft.read_text())
         assert root_data["revision"]["kind"] == "commit"
         assert root_data["revision"]["base"] != root_data["revision"]["head"]
         pr_draft = root / "pr.json"
-        cmd([str(DEMO), "plan", "--base", "HEAD^", "--head", "HEAD", "--out", str(pr_draft)], cwd=repo, env=env)
+        cmd([str(demo), "plan", "--base", "HEAD^", "--head", "HEAD", "--out", str(pr_draft)], cwd=repo, env=env)
         pr_data = json.loads(pr_draft.read_text())
         assert pr_data["revision"]["kind"] == "pr"
         assert pr_data["revision"]["base"] == root_data["revision"]["head"]
@@ -74,7 +78,7 @@ open(out,'w').write(json.dumps(data))
         previous = Path.cwd()
         try:
             os.chdir(repo)
-            runpy.run_path(str(DEMO))["export_tree"](data["revision"]["head"], isolated)
+            runpy.run_path(str(demo))["export_tree"](data["revision"]["head"], isolated)
         finally:
             os.chdir(previous)
         assert "revised function" in (isolated / "hello.py").read_text()
@@ -89,22 +93,24 @@ open(out,'w').write(json.dumps(data))
         bad_data = json.loads(draft.read_text())
         bad_data["scenes"][0]["action"]["type"] = "shell"
         invalid.write_text(json.dumps(bad_data))
-        rejected = subprocess.run([str(DEMO), "render", "--script", str(invalid), "--out", str(root / "bad.webm")],
+        rejected = subprocess.run([str(demo), "render", "--script", str(invalid), "--out", str(root / "bad.webm")],
                                   cwd=repo, capture_output=True, text=True)
         assert rejected.returncode != 0 and "invalid editor action" in rejected.stderr
         print("PASS: plan produced a valid draft and stopped before rendering")
-        preflight = subprocess.run([str(DEMO), "preflight"], cwd=repo, capture_output=True, text=True)
+        if args.plan_only:
+            return 0
+        preflight = subprocess.run([str(demo), "preflight"], cwd=repo, capture_output=True, text=True)
         if preflight.returncode:
             print("GUI smoke unavailable:", preflight.stderr.strip())
             print("On a rootless Podman VM: podman build --pull=always -t localhost/demo-creator:1 -f Containerfile . && ./smoke.py")
             return 2
         output = root / "demo.webm"
-        cmd([str(DEMO), "render", "--script", str(draft), "--out", str(output)], cwd=repo)
+        cmd([str(demo), "render", "--script", str(draft), "--out", str(output)], cwd=repo)
         # ffprobe/ffmpeg are available inside the image; mount the output read-only.
         def media(*args, binary=False):
             return subprocess.run(["podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id",
                                    "--user", f"{os.getuid()}:{os.getgid()}", "--mount",
-                                   f"type=bind,src={output},dst=/video.webm,ro=true", "localhost/demo-creator:1", *args],
+                                   f"type=bind,src={output},dst=/video.webm,ro=true", image, *args],
                                   check=True, capture_output=True, text=not binary)
         info = json.loads(media("ffprobe", "-v", "error", "-show_streams", "-of", "json", "/video.webm").stdout)
         codecs = {s["codec_type"]: s["codec_name"] for s in info["streams"]}
@@ -120,7 +126,7 @@ open(out,'w').write(json.dumps(data))
         reference = root / "edited.wav"
         cmd(["podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id",
              "--user", f"{os.getuid()}:{os.getgid()}", "--mount",
-             f"type=bind,src={root},dst=/scratch,rw=true", "localhost/demo-creator:1",
+             f"type=bind,src={root},dst=/scratch,rw=true", image,
              "flite", "-voice", "kal", "-t", edited, "-o", "/scratch/edited.wav"])
         with wave.open(str(reference)) as wav:
             expected_duration = wav.getnframes() / wav.getframerate()

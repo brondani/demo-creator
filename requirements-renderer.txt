@@ -1,0 +1,9 @@
+playwright==1.56.0 \
+    --hash=sha256:404be089b49d94bc4c1fe0dfb07664bda5ffe87789034a03bffb884489bdfb5c
+pyee==13.0.0 \
+    --hash=sha256:48195a3cddb3b1515ce0695ed76036b5ccc2ef3a9f963ff9f77aec0139845498
+greenlet==3.2.4 \
+    --hash=sha256:0db5594dce18db94f7d1650d7489909b57afde4c580806b8d9203b6e79cdc079 \
+    --hash=sha256:2523e5246274f54fdadbce8494458a2ebdcdbc7b802318466ac5606d3cded1f8
+typing-extensions==4.15.0 \
+    --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548

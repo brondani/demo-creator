@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import posixpath
 import re
 import shutil
@@ -14,8 +15,12 @@ import tarfile
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+VERSION = "0.1.0+dev"
 IMAGE = "localhost/demo-creator:1"
+PREFLIGHT_IMAGE = ("docker.io/library/busybox@sha256:"
+                   "73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662")
 OID = re.compile(r"[0-9a-f]{40,64}\Z")
+SKILLS = ("demo-plan", "demo-render")
 
 
 class DemoError(Exception):
@@ -168,7 +173,9 @@ def plan(args):
     print(f"Wrote {args.out}; review and edit it before rendering")
 
 
-def preflight(image=None):
+def check_podman():
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
+        raise DemoError("the renderer requires Linux x86-64 and rootless Podman")
     if not shutil.which("podman"):
         raise DemoError("rootless Podman is unavailable: install/configure it outside this command")
     if os.geteuid() == 0:
@@ -176,9 +183,127 @@ def preflight(image=None):
     if run(["podman", "info", "--format", "{{.Host.Security.Rootless}}"] ).lower() != "true":
         raise DemoError("Podman is not running rootless")
     run(["podman", "unshare", "true"])
+
+
+def check_container(image=None):
     run(["podman", "run", "--rm", "--network=none", "--pull=never" if image else "--pull=missing",
-         image or "docker.io/library/busybox:1.36.1", "true"], timeout=120)
+         image or PREFLIGHT_IMAGE, "true"], timeout=120)
     print("Rootless Podman can start an offline container")
+
+
+def preflight(image=None):
+    check_podman()
+    check_container(image)
+
+
+def image_exists(image):
+    try:
+        result = subprocess.run(["podman", "image", "exists", image], text=True, capture_output=True)
+    except OSError as exc:
+        raise DemoError(f"podman image exists failed: {exc}") from exc
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise DemoError(f"podman image exists failed: {result.stderr.strip() or f'exit {result.returncode}'}")
+
+
+def skills_dir():
+    for path in (HERE / "skills", HERE / ".github" / "skills"):
+        if all((path / name / "SKILL.md").is_file() for name in SKILLS):
+            return path
+    raise DemoError("packaged demo skills are missing; reinstall the complete release archive")
+
+
+def install_skills(selection):
+    source = skills_dir()
+    homes = {"codex": Path.home() / ".agents" / "skills",
+             "vscode": Path.home() / ".copilot" / "skills"}
+    targets = homes.values() if selection == "all" else (homes[selection],)
+    pending = []
+    for root in targets:
+        for name in SKILLS:
+            target = root / name
+            if target.exists() or target.is_symlink():
+                identical = (not target.is_symlink() and target.is_dir()
+                             and sorted(p.name for p in target.iterdir()) == ["SKILL.md"]
+                             and not (target / "SKILL.md").is_symlink()
+                             and (target / "SKILL.md").is_file()
+                             and (target / "SKILL.md").read_bytes() == (source / name / "SKILL.md").read_bytes())
+                if not identical:
+                    raise DemoError(f"skill already exists and differs: {target}; review it before replacing it")
+            else:
+                pending.append((source / name, target))
+    for origin, target in pending:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(origin, target)
+        print(f"Installed skill {target}")
+    if not pending:
+        print("Selected skills are already installed")
+
+
+def install_cli(prefix):
+    if "+dev" in VERSION:
+        raise DemoError("install a packaged release, not the development checkout")
+    prefix = Path(prefix).expanduser().resolve()
+    destination = prefix / "share" / "demo-creator" / VERSION
+    link = prefix / "bin" / "demo"
+    installed = destination / "demo"
+    previous = link.resolve() if link.is_symlink() else None
+    if link.exists() or link.is_symlink():
+        managed = (previous is not None and previous.name == "demo"
+                   and previous.parent.parent == destination.parent
+                   and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", previous.parent.name)
+                   and previous.is_file())
+        if previous != installed and not managed:
+            raise DemoError(f"refusing to replace existing {link}")
+    source_skills = skills_dir()
+    if destination.exists():
+        if (not installed.is_file() or installed.read_bytes() != Path(__file__).resolve().read_bytes()
+                or any(not (destination / "skills" / name / "SKILL.md").is_file()
+                       or (destination / "skills" / name / "SKILL.md").read_bytes()
+                       != (source_skills / name / "SKILL.md").read_bytes() for name in SKILLS)):
+            raise DemoError(f"existing installation differs: {destination}")
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".install-", dir=destination.parent) as temp:
+            staged = Path(temp) / "release"
+            staged.mkdir()
+            shutil.copy2(Path(__file__).resolve(), staged / "demo")
+            shutil.copytree(source_skills, staged / "skills")
+            for name in ("README.md", "LICENSE"):
+                if (HERE / name).is_file():
+                    shutil.copy2(HERE / name, staged / name)
+            staged.rename(destination)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if previous is None:
+        link.symlink_to(installed)
+    elif previous != installed:
+        with tempfile.TemporaryDirectory(prefix=".demo-link-", dir=link.parent) as temp:
+            replacement = Path(temp) / "demo"
+            replacement.symlink_to(installed)
+            if not link.is_symlink() or link.resolve() != previous:
+                raise DemoError(f"installation link changed during installation: {link}")
+            os.replace(replacement, link)
+    print(f"Installed demo {VERSION} at {link}")
+    if str(link.parent) not in os.get_exec_path():
+        print(f"Add {link.parent} to PATH, or invoke {link} directly")
+
+
+def setup(args):
+    check_podman()
+    if not image_exists(IMAGE):
+        check_container()
+        if IMAGE.startswith("localhost/"):
+            raise DemoError("local development image is missing; build it using the command in README.md")
+        print(f"Pulling renderer {IMAGE}", flush=True)
+        run(["podman", "pull", IMAGE], timeout=1200)
+        if not image_exists(IMAGE):
+            raise DemoError(f"renderer image is unavailable after pulling: {IMAGE}")
+    check_container(image=IMAGE)
+    if args.skills:
+        install_skills(args.skills)
+    print("Setup complete")
 
 
 def export_tree(head, destination):
@@ -220,8 +345,8 @@ def render(args):
     draft = validate(json.loads(Path(args.script).read_text()), repo=True)
     if not shutil.which("podman"):
         raise DemoError("rootless Podman is unavailable: install/configure it outside this command")
-    if subprocess.run(["podman", "image", "exists", IMAGE], capture_output=True).returncode:
-        raise DemoError(f"renderer image {IMAGE} is missing; run the build command in README.md")
+    if not image_exists(IMAGE):
+        raise DemoError(f"renderer image {IMAGE} is missing; run demo setup")
     preflight(image=IMAGE)
     output = Path(args.out).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +372,7 @@ def render(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--version", action="version", version=f"demo {VERSION}")
     sub = p.add_subparsers(dest="command", required=True)
     a = sub.add_parser("plan")
     choice = a.add_mutually_exclusive_group(required=True)
@@ -258,6 +384,12 @@ def main():
     b.add_argument("--script", required=True)
     b.add_argument("--out", required=True)
     sub.add_parser("preflight")
+    s = sub.add_parser("setup", help="check rootless Podman and prepare the pinned renderer")
+    s.add_argument("--skills", choices=("codex", "vscode", "all"))
+    i = sub.add_parser("install", help="install the packaged release in a user prefix")
+    i.add_argument("--prefix", default="~/.local")
+    k = sub.add_parser("install-skills", help="install agent skills without replacing existing skills")
+    k.add_argument("--for", dest="selection", required=True, choices=("codex", "vscode", "all"))
     args = p.parse_args()
     try:
         if args.command == "plan":
@@ -266,8 +398,14 @@ def main():
             plan(args)
         elif args.command == "render":
             render(args)
-        else:
+        elif args.command == "preflight":
             preflight()
+        elif args.command == "setup":
+            setup(args)
+        elif args.command == "install":
+            install_cli(args.prefix)
+        else:
+            install_skills(args.selection)
     except (DemoError, ValueError, KeyError, OSError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired) as exc:
         print(f"demo: {exc}", file=sys.stderr)

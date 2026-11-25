@@ -1,5 +1,7 @@
 FROM --platform=linux/amd64 debian:12.12-slim@sha256:d5d3f9c23164ea16f31852f95bd5959aad1c5e854332fe00f7b3a20fcc9f635c
 
+LABEL org.opencontainers.image.source="https://github.com/brondani/demo-creator"
+
 # Debian's dated archive fixes package selection; the upstream editor is hash checked.
 ARG DEBIAN_SNAPSHOT=20260101T000000Z
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
@@ -21,7 +23,9 @@ RUN curl -fsSL --retry 3 "https://github.com/VSCodium/vscodium/releases/download
  && tar -xzf /tmp/codium.tar.gz -C /opt/codium \
  && rm /tmp/codium.tar.gz
 
-RUN pip3 install --break-system-packages --no-cache-dir playwright==1.56.0
+COPY requirements-renderer.txt /opt/demo/requirements-renderer.txt
+RUN pip3 install --break-system-packages --no-cache-dir --only-binary=:all: \
+      --require-hashes -r /opt/demo/requirements-renderer.txt
 COPY renderer.py /opt/demo/renderer.py
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin demo
 USER demo
