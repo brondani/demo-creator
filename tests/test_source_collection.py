@@ -21,10 +21,16 @@ class SourceCollectionTests(unittest.TestCase):
             data = {"ffmpeg.dsc": b"source descriptor", "ffmpeg.tar.xz": b"source archive"}
             hashes = {name: hashlib.sha1(content).hexdigest() for name, content in data.items()}
             metadata = {
+                "package": "ffmpeg",
+                "version": "7:5.1.8-0+deb12u1",
                 "result": [{"hash": digest} for digest in hashes.values()],
-                "fileinfo": {hashes[name]: [{"name": name, "size": len(content)}]
+                "fileinfo": {hashes[name]: [{"name": name, "size": len(content), "archive_name": "debian"}]
                              for name, content in data.items()},
             }
+            ports_hash = hashlib.sha1(b"ports descriptor").hexdigest()
+            metadata["result"].append({"hash": ports_hash})
+            metadata["fileinfo"][ports_hash] = [{"name": "ffmpeg.dsc", "size": 16,
+                                                  "archive_name": "debian-ports"}]
 
             def response(url):
                 if "/mr/package/" in url:
@@ -42,8 +48,8 @@ class SourceCollectionTests(unittest.TestCase):
 
     def test_mismatched_download_does_not_pass(self):
         digest = hashlib.sha1(b"expected").hexdigest()
-        metadata = {"result": [{"hash": digest}],
-                    "fileinfo": {digest: [{"name": "pkg.dsc", "size": 8}]}}
+        metadata = {"package": "pkg", "version": "1.0", "result": [{"hash": digest}],
+                    "fileinfo": {digest: [{"name": "pkg.dsc", "size": 8, "archive_name": "debian"}]}}
 
         def response(url):
             return io.BytesIO(json.dumps(metadata).encode() if "/mr/package/" in url else b"tampered")

@@ -56,6 +56,8 @@ def collect(package, output):
     metadata_url = f"{BASE}/mr/package/{quote(name, safe='')}/{quote(version, safe='')}/srcfiles?fileinfo=1"
     with open_url(metadata_url) as response:
         metadata = json.load(response)
+    if metadata["package"] != name or metadata["version"] != version:
+        raise ValueError(f"snapshot returned the wrong source package for {name} {version}")
     records = metadata["result"]
     if not records:
         raise ValueError(f"no source files found for {name} {version}")
@@ -66,7 +68,10 @@ def collect(package, output):
         digest = record["hash"]
         if not HASH.fullmatch(digest):
             raise ValueError(f"invalid snapshot hash for {name} {version}")
-        info = metadata["fileinfo"][digest][0]
+        info = next((entry for entry in metadata["fileinfo"][digest]
+                     if entry["archive_name"] in ("debian", "debian-security")), None)
+        if info is None:
+            continue
         filename = info["name"]
         if Path(filename).name != filename or filename in (".", "..") or filename in filenames:
             raise ValueError(f"invalid or duplicate source filename: {filename!r}")
