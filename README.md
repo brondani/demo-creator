@@ -7,7 +7,7 @@
 Run as an ordinary user on Linux x86-64 with Git, Python 3.10+, and preconfigured **rootless Podman**. Planning also requires the Codex CLI to be installed and authenticated. Once a release is published, download its versioned archive and checksum:
 
 ```sh
-VERSION=0.1.0
+VERSION=0.1.1
 BASE="https://github.com/brondani/demo-creator/releases/download/v$VERSION"
 curl -fLO "$BASE/demo-creator-$VERSION.tar.gz"
 curl -fLO "$BASE/SHA256SUMS"
@@ -62,7 +62,7 @@ python3 -m unittest discover -s tests -v
 ./smoke.py
 ```
 
-The development CLI reports `0.1.0+dev` and uses the local image; `demo install` accepts packaged releases only. `./smoke.py --plan-only` checks planning without a container. The full smoke test uses a tiny local Git fixture and a deterministic Codex stub, edits narration, and checks the rendered WebM's codecs, audio, duration, and changing cursor frames.
+The development CLI reports `0.1.1+dev` and uses the local image; `demo install` accepts packaged releases only. `./smoke.py --plan-only` checks planning without a container. The full smoke test uses a tiny local Git fixture and a deterministic Codex stub, edits narration, and checks the rendered WebM's codecs, audio, duration, and changing cursor frames.
 
 The release workflow runs on a `vMAJOR.MINOR.PATCH` tag matching the development CLI version. It tests the CLI and local renderer before pushing an image to GHCR, embeds that image's immutable digest in the release archive, tests the packaged CLI and image, and publishes the release only if the image is publicly pullable. A new GHCR package may initially be private: make the `demo-creator` container package public in GitHub Packages, then rerun the Release workflow for the tag. A published release is never overwritten by the workflow.
 
@@ -78,7 +78,9 @@ The image uses Debian `12.12-slim` with packages selected from the dated `202601
 | --- | --- | --- |
 | VSCodium / Code - OSS | MIT | [VSCodium](https://github.com/VSCodium/vscodium) |
 | Playwright | Apache-2.0 | [Playwright license](https://github.com/microsoft/playwright/blob/main/LICENSE) |
-| pyee, greenlet, typing-extensions | MIT | [pyee](https://github.com/jfhbrook/pyee/blob/main/LICENSE), [greenlet](https://github.com/python-greenlet/greenlet/blob/master/LICENSE), [typing-extensions](https://github.com/python/typing_extensions/blob/main/LICENSE) |
+| pyee | MIT | [pyee license](https://github.com/jfhbrook/pyee/blob/main/LICENSE) |
+| greenlet | MIT and Python-2.0 | [greenlet licenses](https://github.com/python-greenlet/greenlet/blob/master/LICENSE) |
+| typing-extensions | PSF-2.0 | [typing-extensions license](https://github.com/python/typing_extensions/blob/main/LICENSE) |
 | xdotool input driver | BSD-3-Clause | [xdotool copyright](https://github.com/jordansissel/xdotool/blob/main/COPYRIGHT) |
 | Flite engine and bundled `kal` voice | CMU permissive license; `kal` is free for use | [Flite COPYING](https://github.com/festvox/flite/blob/master/COPYING), [Festival voice note](https://github.com/festvox/festival/blob/master/COPYING) |
 | FFmpeg recorder/muxer | LGPL-2.1-or-later in its base configuration; Debian's build may enable GPL components | [FFmpeg license](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md) |

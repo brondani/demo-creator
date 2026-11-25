@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tarfile
@@ -10,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "ghcr.io/brondani/demo-creator@sha256:" + "a" * 64
+VERSION = runpy.run_path(str(ROOT / "demo"))["VERSION"].removesuffix("+dev")
 
 
 class DistributionTests(unittest.TestCase):
@@ -18,15 +20,15 @@ class DistributionTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.out = self.root / "dist"
-        result = self.package("0.1.0", IMAGE, self.out)
+        result = self.package(VERSION, IMAGE, self.out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.archive = self.out / "demo-creator-0.1.0.tar.gz"
+        self.archive = self.out / f"demo-creator-{VERSION}.tar.gz"
         with tarfile.open(self.archive) as tar:
             if sys.version_info >= (3, 12):
                 tar.extractall(self.root, filter="data")
             else:
                 tar.extractall(self.root)
-        self.cli = self.root / "demo-creator-0.1.0" / "demo"
+        self.cli = self.root / f"demo-creator-{VERSION}" / "demo"
         self.env = os.environ.copy()
         self.env["HOME"] = str(self.root / "home")
         Path(self.env["HOME"]).mkdir()
@@ -70,17 +72,17 @@ elif args[0] == "pull":
 
     def test_release_is_reproducible_and_pins_image(self):
         other = self.root / "other"
-        self.assertEqual(self.package("0.1.0", IMAGE, other).returncode, 0)
+        self.assertEqual(self.package(VERSION, IMAGE, other).returncode, 0)
         self.assertEqual(self.archive.read_bytes(), (other / self.archive.name).read_bytes())
-        self.assertEqual(self.call("--version").stdout.strip(), "demo 0.1.0")
+        self.assertEqual(self.call("--version").stdout.strip(), f"demo {VERSION}")
         self.assertIn(f'IMAGE = "{IMAGE}"', self.cli.read_text())
         self.assertTrue((self.cli.parent / "skills" / "demo-plan" / "SKILL.md").is_file())
 
     def test_release_rejects_unpinned_image_and_mismatched_version(self):
-        result = self.package("0.1.0", "ghcr.io/brondani/demo-creator:latest", self.root / "bad")
+        result = self.package(VERSION, "ghcr.io/brondani/demo-creator:latest", self.root / "bad")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("pinned", result.stderr)
-        result = self.package("0.1.1", IMAGE, self.root / "bad")
+        result = self.package("999.999.999", IMAGE, self.root / "bad")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not match", result.stderr)
 
@@ -91,7 +93,7 @@ elif args[0] == "pull":
         link = prefix / "bin" / "demo"
         self.assertTrue(link.is_symlink())
         result = subprocess.run([str(link), "--version"], env=self.env, text=True, capture_output=True)
-        self.assertEqual(result.stdout.strip(), "demo 0.1.0")
+        self.assertEqual(result.stdout.strip(), f"demo {VERSION}")
         self.assertEqual(self.call("install", "--prefix", str(prefix)).returncode, 0)
 
         previous = prefix / "share" / "demo-creator" / "0.0.9" / "demo"
@@ -100,7 +102,7 @@ elif args[0] == "pull":
         link.unlink()
         link.symlink_to(previous)
         self.assertEqual(self.call("install", "--prefix", str(prefix)).returncode, 0)
-        self.assertEqual(link.resolve(), (prefix / "share" / "demo-creator" / "0.1.0" / "demo"))
+        self.assertEqual(link.resolve(), (prefix / "share" / "demo-creator" / VERSION / "demo"))
         self.assertEqual(previous.read_text(), "previous installed version")
 
         other = self.root / "other-prefix"

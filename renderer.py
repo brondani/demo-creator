@@ -17,36 +17,36 @@ def seconds(path):
     return float(result.strip())
 
 
-def key(*keys):
-    run(["xdotool", "key", "--clearmodifiers", *keys])
+def key(env, *keys):
+    run(["xdotool", "key", "--clearmodifiers", *keys], env=env)
 
 
-def pointer():
+def pointer(env):
     for x in range(80, 620, 24):
-        run(["xdotool", "mousemove", str(x), str(190 + x // 12)])
+        run(["xdotool", "mousemove", str(x), str(190 + x // 12)], env=env)
         time.sleep(0.028)
-    run(["xdotool", "click", "1"])
+    run(["xdotool", "click", "1"], env=env)
 
 
-def action(item):
-    pointer()
-    key("ctrl+p")
+def action(item, env):
+    pointer(env)
+    key(env, "ctrl+p")
     time.sleep(0.3)
-    run(["xdotool", "type", "--clearmodifiers", "--delay", "6", "--", item["path"]])
+    run(["xdotool", "type", "--clearmodifiers", "--delay", "6", "--", item["path"]], env=env)
     time.sleep(0.5)
-    key("Return")
+    key(env, "Return")
     time.sleep(0.6)
     if item["type"] == "find_text":
-        key("ctrl+f")
-        run(["xdotool", "type", "--clearmodifiers", "--delay", "6", "--", item["text"]])
+        key(env, "ctrl+f")
+        run(["xdotool", "type", "--clearmodifiers", "--delay", "6", "--", item["text"]], env=env)
         time.sleep(0.4)
-        key("Escape")
+        key(env, "Escape")
     elif item["type"] == "goto_line":
-        key("ctrl+g")
-        run(["xdotool", "type", "--", str(item["line"])])
-        key("Return")
+        key(env, "ctrl+g")
+        run(["xdotool", "type", "--", str(item["line"])], env=env)
+        key(env, "Return")
     elif item["type"] == "scroll_down":
-        key("Page_Down")
+        key(env, "Page_Down")
 
 
 def wait_editor():
@@ -119,7 +119,7 @@ def main(script, output):
             start = time.monotonic()
             try:
                 time.sleep(0.25)
-                action(scene["action"])
+                action(scene["action"], env)
                 remaining = audio_duration + 0.9 - (time.monotonic() - start)
                 if remaining > 0:
                     time.sleep(remaining)
