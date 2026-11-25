@@ -7,13 +7,13 @@
 Run as an ordinary user on Linux x86-64 with Git, Python 3.10+, and preconfigured **rootless Podman**. Planning also requires the Codex CLI to be installed and authenticated. Once a release is published, download its versioned archive and checksum:
 
 ```sh
-VERSION=0.1.2
+VERSION=0.1.3
 BASE="https://github.com/brondani/demo-creator/releases/download/v$VERSION"
-curl -fLO "$BASE/demo-creator-$VERSION.tar.gz"
-curl -fLO "$BASE/SHA256SUMS"
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf "demo-creator-$VERSION.tar.gz"
-"./demo-creator-$VERSION/demo" install
+curl -fLO "$BASE/demo-creator-$VERSION.tar.gz" &&
+curl -fLO "$BASE/SHA256SUMS" &&
+sha256sum --check --ignore-missing SHA256SUMS &&
+tar -xzf "demo-creator-$VERSION.tar.gz" &&
+"./demo-creator-$VERSION/demo" install &&
 ~/.local/bin/demo setup --skills all
 ```
 
@@ -37,11 +37,11 @@ The CLI and renderer do not run natively on Windows. The intended route on an **
 2. Open the **Ubuntu** terminal, not PowerShell. Install prerequisites, then install and sign in to Codex and GitHub CLI in WSL:
 
    ```sh
-   sudo apt update
-   sudo apt install -y git curl ca-certificates python3 podman uidmap slirp4netns fuse-overlayfs gh nodejs npm
-   export PATH="$HOME/.local/bin:$PATH"
-   npm install --global --prefix "$HOME/.local" @openai/codex
-   codex login
+   sudo apt update &&
+   sudo apt install -y git curl ca-certificates python3 podman uidmap slirp4netns fuse-overlayfs gh nodejs npm &&
+   export PATH="$HOME/.local/bin:$PATH" &&
+   npm install --global --prefix "$HOME/.local" @openai/codex &&
+   codex login &&
    gh auth login --web --git-protocol https
    ```
 
@@ -55,19 +55,19 @@ The CLI and renderer do not run natively on Windows. The intended route on an **
    OWNER=Open-CMSIS-Pack
    REPO=vscode-cmsis-solution
    PR=123                       # replace with the PR number
-   mkdir -p ~/src && cd ~/src
-   gh repo clone "$OWNER/$REPO" # skip if you already have this checkout
-   cd "$REPO"
-   gh pr checkout "$PR" --detach
-   BASE=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
-   git fetch origin "$BASE:refs/remotes/origin/$BASE"
+   mkdir -p ~/src && cd ~/src &&
+   gh repo clone "$OWNER/$REPO" &&
+   cd "$REPO" &&
+   gh pr checkout "$PR" --detach &&
+   BASE=$(gh pr view "$PR" --json baseRefName --jq .baseRefName) &&
+   git fetch origin "$BASE:refs/remotes/origin/$BASE" &&
    demo plan --base "origin/$BASE" --head HEAD --out draft.json
    ```
 
-   Review and edit `draft.json`. After approving that specific storyboard, run:
+   If you already have a checkout of the base repository, `cd` there and start with `gh pr checkout`. Review and edit `draft.json`. After approving that specific storyboard, run:
 
    ```sh
-   demo render --script draft.json --out demo.webm
+   demo render --script draft.json --out demo.webm &&
    explorer.exe .
    ```
 
@@ -81,9 +81,9 @@ The CLI and renderer do not run natively on Windows. The intended route on an **
 
 ```sh
 VSCODE_DIR="$HOME/.local/share/demo-creator/vscode-1.109.5"
-mkdir -p "$VSCODE_DIR" "$HOME/.cache"
-curl -fsSL https://update.code.visualstudio.com/1.109.5/linux-x64/stable -o "$HOME/.cache/demo-vscode-1.109.5.tar.gz"
-echo "70160103c0dda50f651a37ee27a65a9a64a6938734cf1a0bcd49d83612bdb1a7  $HOME/.cache/demo-vscode-1.109.5.tar.gz" | sha256sum --check
+mkdir -p "$VSCODE_DIR" "$HOME/.cache" &&
+curl -fsSL https://update.code.visualstudio.com/1.109.5/linux-x64/stable -o "$HOME/.cache/demo-vscode-1.109.5.tar.gz" &&
+echo "70160103c0dda50f651a37ee27a65a9a64a6938734cf1a0bcd49d83612bdb1a7  $HOME/.cache/demo-vscode-1.109.5.tar.gz" | sha256sum --check &&
 tar -xzf "$HOME/.cache/demo-vscode-1.109.5.tar.gz" -C "$VSCODE_DIR" --strip-components=1
 ```
 
@@ -166,7 +166,7 @@ python3 -m unittest discover -s tests -v
 ./smoke.py
 ```
 
-The development CLI reports `0.1.2+dev` and uses the local image; `demo install` accepts packaged releases only. `./smoke.py --plan-only` checks planning without a container. The full smoke test uses a tiny local Git fixture and a deterministic Codex stub, edits narration, and checks the rendered WebM's codecs, audio, duration, and changing cursor frames.
+The development CLI reports `0.1.3+dev` and uses the local image; `demo install` accepts packaged releases only. `./smoke.py --plan-only` checks planning without a container. The full smoke test uses a tiny local Git fixture and a deterministic Codex stub, edits narration, and checks the rendered WebM's codecs, audio, duration, and changing cursor frames.
 Pass `./smoke.py --vscode /path/to/vscode` to also verify standalone tool version reporting and real VSIX activation.
 
 The release workflow runs on a `vMAJOR.MINOR.PATCH` tag matching the development CLI version. It tests the CLI and local renderer, collects the exact Debian source packages for the image, and publishes those sources both as a separate GHCR image and as a release asset. It then pushes the renderer to GHCR, embeds that image's immutable digest in the release archive, tests the packaged CLI and image, and publishes the release only if both images are publicly pullable. A new GHCR package may initially be private: make the `demo-creator` container package public in GitHub Packages, then rerun the Release workflow for the tag. A published release is never overwritten by the workflow.
