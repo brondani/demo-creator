@@ -44,6 +44,12 @@ jobs:
           tar -xzf "$RUNNER_TEMP/vscode.tar.gz" -C "$RUNNER_TEMP/vscode" --strip-components=1
       - name: Smoke-test renderer and artifact preparation
         run: ./smoke.py --vscode "$RUNNER_TEMP/vscode"
+      - name: Activate released CMSIS extensions offline
+        run: |
+          ./demo prepare --source https://github.com/Open-CMSIS-Pack/vscode-cmsis-solution/releases/download/v1.74.0/cmsis-csolution-linux-x64-1.74.0.vsix \
+            --sha256 8cd2ea82f77b55f606285a94ed3bccd93746e24979185aad51987ca7e2eb1016 --vscode "$RUNNER_TEMP/vscode"
+          ./demo prepare --source https://github.com/Open-CMSIS-Pack/vscode-cmsis-debugger/releases/download/v1.10.1/vscode-cmsis-debugger-linux-x64-1.10.1.vsix \
+            --sha256 025db3174cb34b443aa9776a0dfadfea45ffe062f367e16287fe2bc4cee16185 --vscode "$RUNNER_TEMP/vscode"
       - name: Verify Debian source bundle
         if: ${{ inputs.sources }}
         run: |
