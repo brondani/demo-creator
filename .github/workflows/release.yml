@@ -48,8 +48,14 @@ jobs:
         run: ./demo preflight
       - name: Build renderer
         run: podman build --pull=always -t localhost/demo-creator:1 -f Containerfile .
-      - name: Smoke-test local renderer
-        run: ./smoke.py
+      - name: Download official VS Code for activation tests
+        run: |
+          curl -fsSL --retry 3 https://update.code.visualstudio.com/1.109.5/linux-x64/stable -o "$RUNNER_TEMP/vscode.tar.gz"
+          echo "70160103c0dda50f651a37ee27a65a9a64a6938734cf1a0bcd49d83612bdb1a7  $RUNNER_TEMP/vscode.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/vscode"
+          tar -xzf "$RUNNER_TEMP/vscode.tar.gz" -C "$RUNNER_TEMP/vscode" --strip-components=1
+      - name: Smoke-test local renderer and artifact preparation
+        run: ./smoke.py --vscode "$RUNNER_TEMP/vscode"
       - name: Collect corresponding Debian sources
         env:
           TAG: ${{ github.ref_name }}
@@ -99,7 +105,7 @@ jobs:
           podman pull "$IMAGE"
           tar -xzf "dist/demo-creator-$version.tar.gz" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/demo-creator-$version/demo" setup
-          ./smoke.py --cli "$RUNNER_TEMP/demo-creator-$version/demo"
+          ./smoke.py --cli "$RUNNER_TEMP/demo-creator-$version/demo" --vscode "$RUNNER_TEMP/vscode"
           (cd dist && sha256sum "demo-creator-$version.tar.gz" \
             "demo-creator-debian-sources-$version.tar" > SHA256SUMS)
       - name: Verify anonymous image access
