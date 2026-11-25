@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Plan and render narrated source walkthroughs from immutable Git revisions."""
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -13,6 +14,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 
 HERE = Path(__file__).resolve().parent
 VERSION = "0.1.1+dev"
@@ -21,6 +26,7 @@ PREFLIGHT_IMAGE = ("docker.io/library/busybox@sha256:"
                    "73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662")
 OID = re.compile(r"[0-9a-f]{40,64}\Z")
 SKILLS = ("demo-plan", "demo-render")
+ARTIFACT_LIMIT = 512 * 1024 * 1024
 
 
 class DemoError(Exception):
@@ -341,13 +347,166 @@ def export_tree(head, destination):
                 target.symlink_to(member.linkname)
 
 
-def render(args):
-    draft = validate(json.loads(Path(args.script).read_text()), repo=True)
+def require_renderer():
     if not shutil.which("podman"):
         raise DemoError("rootless Podman is unavailable: install/configure it outside this command")
     if not image_exists(IMAGE):
         raise DemoError(f"renderer image {IMAGE} is missing; run demo setup")
     preflight(image=IMAGE)
+
+
+def isolated_renderer(mounts, *command, timeout, workdir="/work"):
+    args = ["podman", "run", "--rm", "--pull=never", "--network=none", "--http-proxy=false", "--read-only", "--cap-drop=all",
+            "--security-opt=no-new-privileges", "--userns=keep-id", "--user", f"{os.getuid()}:{os.getgid()}",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g", "--env", "HOME=/tmp/home",
+            "--env", "XDG_RUNTIME_DIR=/tmp/runtime", "--workdir", workdir]
+    for source, target, read_only in mounts:
+        if "," in str(source):
+            raise DemoError("container mount paths cannot contain commas")
+        args.extend(("--mount", f"type=bind,src={source},dst={target},ro={str(read_only).lower()}"))
+    return run([*args, IMAGE, "python3", "/opt/demo/renderer.py", *command], timeout=timeout)
+
+
+def copy_artifact(source, destination):
+    digest = hashlib.sha256()
+    size = 0
+    with destination.open("xb") as output:
+        while chunk := source.read(1024 * 1024):
+            size += len(chunk)
+            if size > ARTIFACT_LIMIT:
+                raise DemoError("artifact exceeds the 512 MiB limit")
+            output.write(chunk)
+            digest.update(chunk)
+    if not size:
+        raise DemoError("artifact is empty")
+    return digest.hexdigest()
+
+
+def artifact_url(value):
+    url = urllib.parse.urlsplit(value)
+    if (url.scheme != "https" or not url.hostname or url.username is not None
+            or url.password is not None):
+        raise DemoError("artifact downloads require HTTPS URLs without embedded credentials")
+    return value
+
+
+class ArtifactRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return super().redirect_request(req, fp, code, msg, headers, artifact_url(newurl))
+
+
+def stage_input(source, destination):
+    if source.startswith("https:") or "://" in source:
+        opener = urllib.request.build_opener(ArtifactRedirect())
+        try:
+            with opener.open(artifact_url(source), timeout=30) as response:
+                return copy_artifact(response, destination)
+        except urllib.error.HTTPError as exc:
+            raise DemoError(f"artifact download failed (HTTP {exc.code})") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise DemoError(f"artifact download failed ({type(exc).__name__})") from exc
+    path = Path(source).expanduser()
+    if not path.is_file():
+        raise DemoError(f"artifact is not a local file: {path}")
+    with path.open("rb") as stream:
+        return copy_artifact(stream, destination)
+
+
+def verified_actions_artifact(repository, artifact_id, head, archive):
+    if (not re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", repository)
+            or repository.rsplit("/", 1)[-1] in (".", "..")
+            or not re.fullmatch(r"[1-9][0-9]*", artifact_id)):
+        raise DemoError("--pr-artifact requires OWNER/REPO and a numeric artifact ID")
+    if not shutil.which("gh"):
+        raise DemoError("GitHub Actions artifacts require an authenticated GitHub CLI (gh)")
+    endpoint = f"repos/{repository}/actions/artifacts/{artifact_id}"
+    gh = ["gh", "api", "--hostname", "github.com"]
+    metadata = json.loads(run([*gh, endpoint], timeout=30))
+    if metadata.get("expired"):
+        raise DemoError("GitHub Actions artifact has expired")
+    workflow = metadata.get("workflow_run") or {}
+    if workflow.get("head_sha") != head:
+        raise DemoError(f"artifact workflow head {workflow.get('head_sha')} does not match {head}")
+    size = metadata.get("size_in_bytes")
+    if type(size) is not int or not 0 < size <= ARTIFACT_LIMIT:
+        raise DemoError("GitHub Actions artifact size is missing or exceeds the 512 MiB limit")
+    with archive.open("wb") as output:
+        subprocess.run([*gh, endpoint + "/zip"], stdout=output, check=True, timeout=180)
+    if archive.stat().st_size != size:
+        raise DemoError("GitHub Actions artifact download size does not match its metadata")
+    if expected := metadata.get("digest"):
+        digest = hashlib.sha256()
+        with archive.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        if expected != "sha256:" + digest.hexdigest():
+            raise DemoError("GitHub Actions artifact ZIP does not match its published digest")
+
+
+def stage_actions_member(archive, member, kind, destination):
+    try:
+        with zipfile.ZipFile(archive) as package:
+            matches = [item for item in package.infolist() if not item.is_dir() and
+                       (item.filename == member if member else item.filename.lower().endswith(".vsix"))]
+            if (kind == "tool" and not member) or len(matches) != 1:
+                raise DemoError("select exactly one GitHub Actions ZIP entry with --member")
+            if matches[0].file_size > ARTIFACT_LIMIT:
+                raise DemoError("selected artifact entry exceeds the 512 MiB limit")
+            with package.open(matches[0]) as source:
+                return copy_artifact(source, destination)
+    except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
+        raise DemoError(f"cannot read GitHub Actions artifact ZIP: {exc}") from exc
+
+
+def vscode_directory(override):
+    code = shutil.which("code")
+    choices = ([Path(override).expanduser().resolve()] if override else
+               ([Path(code).resolve().parent.parent] if code else []) + [Path("/usr/share/code")])
+    for editor in choices:
+        if all((editor / name).is_file() for name in ("bin/code", "code", "resources/app/product.json")):
+            if (editor / "data").exists():
+                raise DemoError("use a VS Code installation without a portable data directory")
+            return editor
+    raise DemoError("set --vscode to a complete Microsoft VS Code Linux x64 installation directory")
+
+
+def prepare(args):
+    if args.kind == "tool" and (args.vscode or args.dependency):
+        raise DemoError("--vscode and --dependency apply only to VSIX preparation")
+    if args.source and (args.commit or args.member):
+        raise DemoError("--commit and --member apply only to --pr-artifact")
+    if args.sha256 and not re.fullmatch(r"[0-9a-fA-F]{64}", args.sha256):
+        raise DemoError("--sha256 must be a 64-digit hexadecimal SHA-256")
+    editor = vscode_directory(args.vscode) if args.kind == "vsix" else None
+    require_renderer()
+    with tempfile.TemporaryDirectory(prefix="demo-prepare-") as temp:
+        root = Path(temp)
+        staged = root / "artifacts"
+        staged.mkdir()
+        primary = staged / ("primary.vsix" if args.kind == "vsix" else "tool")
+        if args.pr_artifact:
+            head = oid(args.commit or "HEAD")
+            archive = root / "actions.zip"
+            verified_actions_artifact(*args.pr_artifact, head, archive)
+            digest = stage_actions_member(archive, args.member, args.kind, primary)
+            print(f"GitHub Actions artifact {args.pr_artifact[0]} ID {args.pr_artifact[1]}, workflow head {head}")
+        else:
+            digest = stage_input(args.source, primary)
+        if args.sha256 and digest != args.sha256.lower():
+            raise DemoError("selected artifact does not match --sha256")
+        print(f"Artifact SHA-256: {digest}", flush=True)
+        for i, source in enumerate(args.dependency, 1):
+            dependency_digest = stage_input(source, staged / f"dependency-{i:03}.vsix")
+            print(f"Companion {i} SHA-256: {dependency_digest}", flush=True)
+        mounts = [(staged, "/artifacts", True)]
+        if editor:
+            mounts.append((editor, "/opt/vscode", True))
+        print(isolated_renderer(mounts, "--prepare", args.kind, timeout=240, workdir="/tmp"))
+
+
+def render(args):
+    draft = validate(json.loads(Path(args.script).read_text()), repo=True)
+    require_renderer()
     output = Path(args.out).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="demo-render-") as temp:
@@ -356,13 +515,9 @@ def render(args):
         tree.mkdir(); result.mkdir()
         export_tree(draft["revision"]["head"], tree)
         (root / "script.json").write_text(json.dumps(draft))
-        run(["podman", "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=all",
-             "--security-opt=no-new-privileges", "--userns=keep-id", "--user", f"{os.getuid()}:{os.getgid()}",
-             "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g", "--env", "HOME=/tmp/home", "--env", "XDG_RUNTIME_DIR=/tmp/runtime",
-             "--mount", f"type=bind,src={tree},dst=/work,ro=true",
-             "--mount", f"type=bind,src={root / 'script.json'},dst=/script.json,ro=true",
-             "--mount", f"type=bind,src={result},dst=/result,rw=true", IMAGE,
-             "python3", "/opt/demo/renderer.py", "/script.json", "/result/demo.webm"], timeout=900)
+        isolated_renderer([(tree, "/work", True), (root / "script.json", "/script.json", True),
+                           (result, "/result", False)],
+                          "/script.json", "/result/demo.webm", timeout=900)
         rendered = result / "demo.webm"
         if not rendered.is_file() or rendered.stat().st_size == 0:
             raise DemoError("renderer produced no video")
@@ -383,6 +538,18 @@ def main():
     b = sub.add_parser("render")
     b.add_argument("--script", required=True)
     b.add_argument("--out", required=True)
+    prep = sub.add_parser("prepare", help="verify a tool or VSIX in a disposable offline environment")
+    inputs = prep.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--source", help="local file or HTTPS URL for a VSIX or standalone executable")
+    inputs.add_argument("--pr-artifact", nargs=2, metavar=("OWNER/REPO", "ARTIFACT_ID"),
+                        help="download a GitHub Actions artifact from the exact selected commit")
+    prep.add_argument("--commit", help="expected Actions workflow head (default: HEAD)")
+    prep.add_argument("--member", help="exact ZIP entry (required for tools or multiple VSIX files)")
+    prep.add_argument("--kind", choices=("vsix", "tool"), default="vsix")
+    prep.add_argument("--sha256", help="expected SHA-256 of the selected VSIX or executable")
+    prep.add_argument("--vscode", help="override the detected Microsoft VS Code Linux x64 installation directory")
+    prep.add_argument("--dependency", action="append", default=[], metavar="FILE_OR_URL",
+                      help="companion VSIX to install offline before the selected VSIX (repeatable)")
     sub.add_parser("preflight")
     s = sub.add_parser("setup", help="check rootless Podman and prepare the pinned renderer")
     s.add_argument("--skills", choices=("codex", "vscode", "all"))
@@ -398,6 +565,8 @@ def main():
             plan(args)
         elif args.command == "render":
             render(args)
+        elif args.command == "prepare":
+            prepare(args)
         elif args.command == "preflight":
             preflight()
         elif args.command == "setup":

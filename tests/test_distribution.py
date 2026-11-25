@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -7,11 +8,14 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "ghcr.io/brondani/demo-creator@sha256:" + "a" * 64
-VERSION = runpy.run_path(str(ROOT / "demo"))["VERSION"].removesuffix("+dev")
+CLI = runpy.run_path(str(ROOT / "demo"))
+VERSION = CLI["VERSION"].removesuffix("+dev")
 
 
 class DistributionTests(unittest.TestCase):
@@ -162,6 +166,39 @@ elif args[0] == "pull":
         result = self.call("setup")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("storage unavailable", result.stderr)
+
+    def test_prepare_checks_digest_before_executing_tool(self):
+        source = self.root / "tool"
+        source.write_bytes(b"fixture executable")
+        prepare = CLI["prepare"]
+        argv = ["demo", "prepare", "--kind", "tool", "--source", str(source), "--sha256", "0" * 64]
+        with (patch.object(sys, "argv", argv), patch("sys.stderr", new_callable=io.StringIO) as stderr,
+              patch.dict(prepare.__globals__, {"require_renderer": lambda: None,
+                                               "isolated_renderer": lambda *a, **k: self.fail("executed tool")})):
+            self.assertEqual(CLI["main"](), 1)
+            self.assertIn("does not match --sha256", stderr.getvalue())
+
+    def test_pr_artifact_is_not_downloaded_for_a_different_workflow_head(self):
+        verify = CLI["verified_actions_artifact"]
+        metadata = {"workflow_run": {"head_sha": "a" * 40}, "size_in_bytes": 100}
+        with (patch("shutil.which", return_value="/usr/bin/gh"),
+              patch.dict(verify.__globals__, {"run": lambda *a, **k: json.dumps(metadata)}),
+              patch("subprocess.run") as download):
+            with self.assertRaisesRegex(CLI["DemoError"], "does not match"):
+                verify("org/repo", "123", "b" * 40, self.root / "download.zip")
+        download.assert_not_called()
+
+    def test_actions_zip_requires_explicit_selection_for_multiple_vsixes(self):
+        archive = self.root / "archive.zip"
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("linux/fixture.vsix", b"linux")
+            package.writestr("windows/fixture.vsix", b"windows")
+        selected = self.root / "primary.vsix"
+        stage = CLI["stage_actions_member"]
+        with self.assertRaisesRegex(CLI["DemoError"], "exactly one"):
+            stage(archive, None, "vsix", selected)
+        stage(archive, "linux/fixture.vsix", "vsix", selected)
+        self.assertEqual(selected.read_bytes(), b"linux")
 
 
 if __name__ == "__main__":

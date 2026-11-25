@@ -2,9 +2,12 @@
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import time
+import zipfile
 
 
 def run(args, **kw):
@@ -69,6 +72,109 @@ def wait_editor():
             pass
         time.sleep(0.3)
     raise RuntimeError("VSCodium desktop did not become ready")
+
+
+def vsix_identity(path):
+    with zipfile.ZipFile(path) as archive:
+        manifest = archive.getinfo("extension/package.json")
+        if manifest.file_size > 1024 * 1024:
+            raise ValueError(f"{path.name}: VSIX manifest exceeds 1 MiB")
+        data = json.loads(archive.read(manifest))
+    for field in ("publisher", "name", "version"):
+        if not isinstance(data.get(field), str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.+-]{0,127}", data[field]):
+            raise ValueError(f"{path.name}: invalid VSIX {field}")
+    return f"{data['publisher']}.{data['name']}".lower(), data["version"]
+
+
+def verify_activation(editor_dir, flags, identifier, version, scratch):
+    probe = scratch / "activation-probe"
+    probe.mkdir()
+    (probe / "package.json").write_text(json.dumps({
+        "name": "activation-probe", "publisher": "demo-creator", "version": "0.0.1",
+        "engines": {"vscode": "^1.80.0"},
+    }))
+    (probe / "probe.js").write_text("""
+const fs = require('node:fs');
+const path = require('node:path');
+const vscode = require('vscode');
+const local = name => path.join(__dirname, name);
+exports.run = async () => {
+    let result;
+    try {
+        const [id, version] = JSON.parse(fs.readFileSync(local('target.json'), 'utf8'));
+        const extension = vscode.extensions.getExtension(id);
+        if (!extension || extension.packageJSON.version !== version) {
+            throw new Error(`expected ${id}@${version} in the extension host`);
+        }
+        await extension.activate();
+        if (!extension.isActive) throw new Error(`${id} did not become active`);
+        result = {active: true};
+    } catch (error) {
+        result = {active: false, error: String(error)};
+    }
+    fs.writeFileSync(local('result.json'), JSON.stringify(result));
+};
+""")
+    (probe / "target.json").write_text(json.dumps([identifier, version]))
+    result_file = probe / "result.json"
+    result = subprocess.run(
+        ["xvfb-run", "-a", str(editor_dir / "code"), *flags, "--disable-gpu",
+         "--disable-dev-shm-usage", "--skip-welcome", "--skip-release-notes",
+         f"--extensionDevelopmentPath={probe}", f"--extensionTestsPath={probe / 'probe.js'}"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
+    if result.returncode or not result_file.is_file():
+        raise RuntimeError(f"no activation result for {identifier} from VS Code:\n{result.stdout[-4096:]}")
+    status = json.loads(result_file.read_text())
+    if not status["active"]:
+        raise RuntimeError(f"{identifier} activation failed: {status['error']}")
+
+
+def prepare_vsix(editor_dir, artifacts, scratch):
+    flags = ["--no-sandbox", f"--user-data-dir={scratch / 'profile'}", f"--extensions-dir={scratch / 'extensions'}",
+             "--disable-updates", "--disable-telemetry", "--disable-workspace-trust"]
+    settings = scratch / "profile/User/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"extensions.autoUpdate": False, "extensions.autoCheckUpdates": False,
+                                    "extensions.ignoreRecommendations": True, "update.mode": "none"}))
+    cli = [str(editor_dir / "bin/code"), *flags]
+    editor_version, _, arch = subprocess.check_output([*cli, "--version"], text=True, timeout=15).splitlines()
+    if arch.strip() != "x64":
+        raise RuntimeError(f"expected a Linux x64 VS Code build, got {arch}")
+    primary = artifacts / "primary.vsix"
+    packages = sorted(artifacts.glob("dependency-*.vsix")) + [primary]
+    installed = {}
+    for path in packages:
+        identifier, version = vsix_identity(path)
+        if identifier in installed:
+            raise ValueError(f"multiple VSIX files provide {identifier}")
+        installed[identifier] = version
+        result = subprocess.run([*cli, "--install-extension", str(path), "--do-not-include-pack-dependencies"],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45)
+        if result.returncode:
+            raise RuntimeError(f"cannot install {identifier}@{version} in VS Code {editor_version}:\n{result.stdout}")
+    listed = subprocess.check_output([*cli, "--list-extensions", "--show-versions"], text=True, timeout=15)
+    listed_versions = set(listed.lower().splitlines())
+    if any(f"{name}@{v}".lower() not in listed_versions for name, v in installed.items()):
+        raise RuntimeError(f"VS Code did not list all selected extension versions:\n{listed}")
+    verify_activation(editor_dir, flags, identifier, version, scratch)
+    print(f"Activated {identifier}@{version} in isolated VS Code {editor_version}")
+
+
+def prepare(kind):
+    Path("/tmp/home").mkdir()
+    Path("/tmp/runtime").mkdir(mode=0o700)
+    if kind == "vsix":
+        prepare_vsix(Path("/opt/vscode"), Path("/artifacts"), Path("/tmp"))
+        return
+    if kind != "tool":
+        raise ValueError(f"unsupported artifact kind: {kind}")
+    executable = Path("/tmp/tool")
+    shutil.copyfile("/artifacts/tool", executable)
+    executable.chmod(0o700)
+    result = subprocess.check_output([str(executable), "--version"], text=True, timeout=30).strip()
+    if not result:
+        raise RuntimeError("tool --version returned no version output")
+    print(f"Tool version check: {result}")
 
 
 def main(script, output):
@@ -154,4 +260,7 @@ def main(script, output):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    if sys.argv[1] == "--prepare":
+        prepare(sys.argv[2])
+    else:
+        main(sys.argv[1], sys.argv[2])

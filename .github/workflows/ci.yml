@@ -36,8 +36,14 @@ jobs:
         run: ./demo preflight
       - name: Build renderer
         run: podman build --pull=always -t localhost/demo-creator:1 -f Containerfile .
-      - name: Smoke-test renderer
-        run: ./smoke.py
+      - name: Download official VS Code for the activation smoke test
+        run: |
+          curl -fsSL --retry 3 https://update.code.visualstudio.com/1.109.5/linux-x64/stable -o "$RUNNER_TEMP/vscode.tar.gz"
+          echo "70160103c0dda50f651a37ee27a65a9a64a6938734cf1a0bcd49d83612bdb1a7  $RUNNER_TEMP/vscode.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/vscode"
+          tar -xzf "$RUNNER_TEMP/vscode.tar.gz" -C "$RUNNER_TEMP/vscode" --strip-components=1
+      - name: Smoke-test renderer and artifact preparation
+        run: ./smoke.py --vscode "$RUNNER_TEMP/vscode"
       - name: Verify Debian source bundle
         if: ${{ inputs.sources }}
         run: |

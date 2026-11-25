@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import wave
+import zipfile
 
 def cmd(args, **kw):
     result = subprocess.run(args, text=True, capture_output=True, **kw)
@@ -17,10 +18,42 @@ def cmd(args, **kw):
     return result
 
 
+def smoke_prepare(demo, root, vscode):
+    tool = root / "version-tool"
+    tool.write_text('#!/bin/sh\n[ "$1" = --version ] && printf "fixture-tool 1.2.3\\n"\n')
+    result = cmd([str(demo), "prepare", "--kind", "tool", "--source", str(tool)])
+    assert "Tool version check: fixture-tool 1.2.3" in result.stdout, result.stdout
+
+    vsix = root / "fixture.vsix"
+    with zipfile.ZipFile(vsix, "w") as archive:
+        archive.writestr("[Content_Types].xml", """\
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="json" ContentType="application/json"/>
+  <Default Extension="js" ContentType="application/javascript"/>
+  <Default Extension="vsixmanifest" ContentType="text/xml"/>
+</Types>""")
+        archive.writestr("extension.vsixmanifest", """\
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata><Identity Id="fixture" Version="1.2.3" Publisher="demotest"/>
+  <DisplayName>Demo fixture</DisplayName><Description xml:space="preserve">Smoke test.</Description></Metadata>
+  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation>
+  <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets>
+</PackageManifest>""")
+        archive.writestr("extension/package.json", json.dumps({
+            "publisher": "demotest", "name": "fixture", "version": "1.2.3",
+            "engines": {"vscode": "^1.109.0"}, "main": "./main.js",
+        }))
+        archive.writestr("extension/main.js", "exports.activate = () => ({ready: true});\n")
+    result = cmd([str(demo), "prepare", "--vscode", str(vscode.resolve()), "--source", str(vsix)])
+    assert "Activated demotest.fixture@1.2.3 in isolated VS Code " in result.stdout, result.stdout
+    print("PASS: standalone tool version checked and fixture VSIX activated in isolated VS Code")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", type=Path, default=Path(__file__).resolve().with_name("demo"))
     parser.add_argument("--plan-only", action="store_true", help="skip container and media checks")
+    parser.add_argument("--vscode", type=Path, help="also smoke-test artifact preparation using this VS Code build")
     args = parser.parse_args()
     demo = args.cli.resolve()
     image = runpy.run_path(str(demo))["IMAGE"]
@@ -104,6 +137,8 @@ open(out,'w').write(json.dumps(data))
             print("GUI smoke unavailable:", preflight.stderr.strip())
             print("On a rootless Podman VM: podman build --pull=always -t localhost/demo-creator:1 -f Containerfile . && ./smoke.py")
             return 2
+        if args.vscode:
+            smoke_prepare(demo, root, args.vscode)
         output = root / "demo.webm"
         cmd([str(demo), "render", "--script", str(draft), "--out", str(output)], cwd=repo)
         # ffprobe/ffmpeg are available inside the image; mount the output read-only.

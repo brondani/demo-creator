@@ -21,6 +21,28 @@ Add `~/.local/bin` to `PATH` if necessary. `demo install` keeps releases under `
 
 `demo setup` checks rootless Podman before pulling the release's exact renderer image digest. It may first pull a small, digest-pinned BusyBox image to verify that an offline container can launch. Setup needs network access; rendering does not. If rootless containers cannot run on the VM, setup reports the error and cannot fix the host configuration. There is no host sudo, package installation prompt, privileged container, display mount, or Docker socket. Rootless Docker is not supported.
 
+## Prepare a PR artifact or a supplied build
+
+`demo prepare` (currently in the development checkout) optionally verifies the tool or extension build before you plan or record. Choose a **GitHub Actions artifact** uploaded for the commit being demoed, or a **local file or direct HTTPS download URL**. Only run builds you trust: the tool or extension executes inside the disposable container. Nothing is installed into your daily editor.
+
+```sh
+# A VSIX you already have; for a direct download, pass its HTTPS URL instead.
+demo prepare --source /path/to/cmsis-nightly.vsix
+
+# From the target checkout, use the Actions artifact ID (not the run ID).
+demo prepare --pr-artifact Open-CMSIS-Pack/vscode-cmsis-solution 123456789 \
+  --commit my-pr --vscode /usr/share/code
+
+# A self-contained Linux x64 CLI; must return a version from --version.
+demo prepare --kind tool --source /path/to/cmsis-toolbox-binary
+```
+
+For Actions downloads, authenticate `gh` with read access to the repository. The CLI rejects expired artifacts and artifacts whose recorded workflow head differs from the selected commit (`HEAD` by default). For a ZIP with multiple VSIX files, or for a standalone tool inside an Actions ZIP, provide `--member` with the exact path inside the ZIP. A direct URL must return the actual VSIX or executable, not an Actions page, ZIP wrapper, or installer. The CLI prints the artifact's SHA-256; pass `--sha256` with a trusted expected digest to verify it. A supplied file or URL is not automatically tied to the PR.
+
+For Open-CMSIS-Pack extensions, preparation detects a normal Microsoft VS Code **Linux x64** installation from `code` on `PATH` or `/usr/share/code`. To select another build, pass `--vscode` with its installation directory or the directory of an extracted official Linux archive. Use a version accepted by the selected VSIX's `engines.vscode`. VS Code is not bundled or redistributed. Preparation installs into an empty profile, checks the installed ID and version, then activates the selected extension in a real VS Code extension host. No extensions are fetched from the Marketplace. Supply any required companion extensions as local VSIX files or direct HTTPS URLs with repeatable `--dependency` options. For example, the CMSIS Debugger extension pack lists Serial Monitor and Eclipse CDT extensions; pack entries are not installed automatically.
+
+Acquisition can use the network, but installation, activation, and version checks run offline with no host profile, credentials, or hardware access. The prepared profile is discarded afterward. Activation in an empty window does not verify CMSIS builds, debugging, or features that require a project, additional tools, network, or a target board. The recording workflow below is unchanged: it uses the prebuilt VSCodium renderer for source walkthroughs and does not record the prepared artifact in action.
+
 ## Plan and render
 
 From the target Git repository:
@@ -63,6 +85,7 @@ python3 -m unittest discover -s tests -v
 ```
 
 The development CLI reports `0.1.1+dev` and uses the local image; `demo install` accepts packaged releases only. `./smoke.py --plan-only` checks planning without a container. The full smoke test uses a tiny local Git fixture and a deterministic Codex stub, edits narration, and checks the rendered WebM's codecs, audio, duration, and changing cursor frames.
+Pass `./smoke.py --vscode /path/to/vscode` to also verify standalone tool version reporting and real VSIX activation.
 
 The release workflow runs on a `vMAJOR.MINOR.PATCH` tag matching the development CLI version. It tests the CLI and local renderer, collects the exact Debian source packages for the image, and publishes those sources both as a separate GHCR image and as a release asset. It then pushes the renderer to GHCR, embeds that image's immutable digest in the release archive, tests the packaged CLI and image, and publishes the release only if both images are publicly pullable. A new GHCR package may initially be private: make the `demo-creator` container package public in GitHub Packages, then rerun the Release workflow for the tag. A published release is never overwritten by the workflow.
 
