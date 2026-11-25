@@ -446,6 +446,11 @@ def verified_actions_artifact(repository, artifact_id, head, archive):
 def stage_actions_member(archive, member, kind, destination):
     try:
         with zipfile.ZipFile(archive) as package:
+            names = set(package.namelist())
+            vsix_files = {"[Content_Types].xml", "extension.vsixmanifest", "extension/package.json"}
+            if kind == "vsix" and member is None and vsix_files <= names:
+                with archive.open("rb") as source:
+                    return copy_artifact(source, destination)
             matches = [item for item in package.infolist() if not item.is_dir() and
                        (item.filename == member if member else item.filename.lower().endswith(".vsix"))]
             if (kind == "tool" and not member) or len(matches) != 1:

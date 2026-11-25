@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -199,6 +200,27 @@ elif args[0] == "pull":
             stage(archive, None, "vsix", selected)
         stage(archive, "linux/fixture.vsix", "vsix", selected)
         self.assertEqual(selected.read_bytes(), b"linux")
+
+    def test_actions_selects_raw_or_wrapped_vsix(self):
+        vsix = io.BytesIO()
+        with zipfile.ZipFile(vsix, "w") as package:
+            package.writestr("[Content_Types].xml", "fixture")
+            package.writestr("extension.vsixmanifest", "fixture")
+            package.writestr("extension/package.json", "{}")
+        payload = vsix.getvalue()
+        archive = self.root / "archive.zip"
+        selected = self.root / "primary.vsix"
+        stage = CLI["stage_actions_member"]
+        archive.write_bytes(payload)
+        digest = stage(archive, None, "vsix", selected)
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+        self.assertEqual(selected.read_bytes(), payload)
+
+        selected.unlink()
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("linux/fixture.vsix", payload)
+        self.assertEqual(stage(archive, None, "vsix", selected), digest)
+        self.assertEqual(selected.read_bytes(), payload)
 
 
 if __name__ == "__main__":
